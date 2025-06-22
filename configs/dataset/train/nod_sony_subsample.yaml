@@ -1,0 +1,5 @@
+defaults:
+- nod_sony
+- _self_
+
+resample_dataset_size: 23139
