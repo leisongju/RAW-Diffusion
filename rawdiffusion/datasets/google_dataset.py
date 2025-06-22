@@ -9,6 +9,7 @@ import glob
 
 class GoogleDataset:
     def __init__(self, root_dir="/mnt/datalsj/dual_pixel/data/google", is_train=False, transforms=None):
+        self.is_train = is_train
         if is_train:
             self.root_dir = os.path.join(root_dir, "train")
         else:
@@ -45,7 +46,10 @@ class GoogleDataset:
         # 加载对应的数据
         left_raw = cv2.imread(raw_left_path) / 255.0
         right_raw = cv2.imread(raw_right_path) / 255.0
-        
+
+        if not self.is_train:
+            rgb_image = cv2.resize(rgb_image, (736, 992))
+
         if left_raw.shape[:2] != rgb_image.shape[:2]:
             left_raw = cv2.resize(left_raw, (rgb_image.shape[1], rgb_image.shape[0]))
         if right_raw.shape[:2] != rgb_image.shape[:2]:
@@ -53,7 +57,7 @@ class GoogleDataset:
 
         if self.transforms is not None:
             rgb_image, left_raw, right_raw = self.transforms(rgb_image, left_raw, right_raw)
-        
+
         rgb_image = self.np2tensor(rgb_image).float()
         left_raw = self.np2tensor(left_raw).float()
         right_raw = self.np2tensor(right_raw).float()

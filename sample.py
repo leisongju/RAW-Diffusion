@@ -25,7 +25,7 @@ from rawdiffusion.evaluation.metrics import (
 from rawdiffusion.datasets.dataset_factory import create_dataset
 from rawdiffusion.gaussian_diffusion_factory import create_gaussian_diffusion
 from rawdiffusion.utils import get_output_path
-from train import RAWDiffusionModule
+from train_pdraw import PDRAWDiffusionModule
 from rawdiffusion.config import mod_config
 from rawdiffusion.utils import create_folder_for_file
 from rawdiffusion.utils import gamma_correction, rggb_to_rgb
@@ -63,7 +63,7 @@ def main(cfg: DictConfig) -> None:
     output_name = get_val_output_name(cfg)
     print(f"inference output name: {output_name}")
 
-    raw_module = RAWDiffusionModule.load_from_checkpoint(
+    raw_module = PDRAWDiffusionModule.load_from_checkpoint(
         checkpoint_path, experiment_folder=experiment_folder, **cfg
     )
 
@@ -141,7 +141,9 @@ def main(cfg: DictConfig) -> None:
         num_samples = 0
 
         for batch in data_val:
-            raw_data = batch["raw_data"].cuda()
+            # PDRAW数据：包含左右眼RAW
+            left_raw_data = batch["left_raw_data"].cuda()
+            right_raw_data = batch["right_raw_data"].cuda()
             guidance_data = batch["guidance_data"].cuda()
 
             guidance_input = raw_module.preprocess_guidance(guidance_data)
@@ -149,8 +151,11 @@ def main(cfg: DictConfig) -> None:
 
             progress.reset(task_batch_id, total=diffusion.num_timesteps)
 
+            # 将左右眼RAW数据拼接成单个tensor
+            combined_raw_data = torch.cat([left_raw_data, right_raw_data], dim=1)
+            
             ts = diffusion.num_timesteps - 1
-            noise = torch.randn_like(raw_data)
+            noise = torch.randn_like(combined_raw_data)
 
             indices = list(range(ts))[::-1]
             sample_fn_progressive = (
@@ -167,7 +172,7 @@ def main(cfg: DictConfig) -> None:
                     model,
                     shape=(
                         guidance_data.shape[0],
-                        3,
+                        6,  # 左右眼拼接：3+3=6通道
                         guidance_data.shape[2],
                         guidance_data.shape[3],
                     ),
@@ -187,25 +192,49 @@ def main(cfg: DictConfig) -> None:
                         samples.append(sample)
 
             sample = (sample + 1) / 2.0
-            raw_data = (raw_data + 1) / 2.0
+            combined_raw_data = (combined_raw_data + 1) / 2.0
             samples = [(sample + 1) / 2.0 for sample in samples]
             noise = (noise + 1) / 2.0
             guidance_data = (guidance_data + 1) / 2.0
 
+            # 将生成的拼接tensor分割回左右眼
+            left_raw_generated = sample[:, :3, :, :]  # 前3通道是左眼
+            right_raw_generated = sample[:, 3:, :, :]  # 后3通道是右眼
+            left_raw_data_separated = combined_raw_data[:, :3, :, :]  # 前3通道是左眼
+            right_raw_data_separated = combined_raw_data[:, 3:, :, :]  # 后3通道是右眼
+
             if not rgb_only:
-                metrics_sampling.update(raw_data, sample)
+                # 分别评估左右眼
+                metrics_sampling.update(left_raw_data_separated, left_raw_generated)
+                metrics_sampling.update(right_raw_data_separated, right_raw_generated)
 
-            batch_rgb = rggb_to_rgb(raw_data)
-            samples_rgb = [rggb_to_rgb(sample) for sample in samples]
+            # 转换为RGB进行可视化
+            if left_raw_data_separated.shape[1] == 4:  # RGGB格式
+                left_batch_rgb = rggb_to_rgb(left_raw_data_separated)
+                right_batch_rgb = rggb_to_rgb(right_raw_data_separated)
+                left_sample_rgb = rggb_to_rgb(left_raw_generated)
+                right_sample_rgb = rggb_to_rgb(right_raw_generated)
+                samples_left_rgb = [rggb_to_rgb(s[:, :3, :, :]) for s in samples]
+                samples_right_rgb = [rggb_to_rgb(s[:, 3:, :, :]) for s in samples]
+            else:
+                left_batch_rgb = left_raw_data_separated
+                right_batch_rgb = right_raw_data_separated
+                left_sample_rgb = left_raw_generated
+                right_sample_rgb = right_raw_generated
+                samples_left_rgb = [s[:, :3, :, :] for s in samples]
+                samples_right_rgb = [s[:, 3:, :, :] for s in samples]
 
-            batch_rgb_gc = gamma_correction(batch_rgb)
-            samples_rgb_gc = [gamma_correction(s) for s in samples_rgb]
+            left_batch_rgb_gc = gamma_correction(left_batch_rgb)
+            right_batch_rgb_gc = gamma_correction(right_batch_rgb)
+            left_sample_rgb_gc = gamma_correction(left_sample_rgb)
+            right_sample_rgb_gc = gamma_correction(right_sample_rgb)
+            samples_left_rgb_gc = [gamma_correction(s) for s in samples_left_rgb]
+            samples_right_rgb_gc = [gamma_correction(s) for s in samples_right_rgb]
 
-            sample_rgb = rggb_to_rgb(sample)
-            sample_rgb_gc = gamma_correction(sample_rgb)
-
-            sample_np = sample.cpu().numpy()
-            batch_np = raw_data.cpu().numpy()
+            left_sample_np = left_raw_generated.cpu().numpy()
+            right_sample_np = right_raw_generated.cpu().numpy()
+            left_batch_np = left_raw_data_separated.cpu().numpy()
+            right_batch_np = right_raw_data_separated.cpu().numpy()
 
             for j in range(sample.shape[0]):
                 rel_path = batch["path"][j]
@@ -214,7 +243,7 @@ def main(cfg: DictConfig) -> None:
                     rel_path = os.path.basename(rel_path)
                 fn = os.path.splitext(rel_path)[0]
 
-                if torch.isnan(sample_rgb[j]).any():
+                if torch.isnan(left_sample_rgb[j]).any() or torch.isnan(right_sample_rgb[j]).any():
                     print("sample is nan. skipping")
                     continue
 
@@ -222,46 +251,73 @@ def main(cfg: DictConfig) -> None:
                     gt_data_path = os.path.join(image_path, fn + "_gt.png")
                     create_folder_for_file(gt_data_path)
                     if not rgb_only:
-                        tv.utils.save_image(batch_rgb_gc[j], gt_data_path)
-                    tv.utils.save_image(
-                        sample_rgb_gc[j], os.path.join(image_path, fn + ".png")
-                    )
+                        tv.utils.save_image(left_batch_rgb_gc[j], os.path.join(image_path, fn + "_left_gt.png"))
+                        tv.utils.save_image(right_batch_rgb_gc[j], os.path.join(image_path, fn + "_right_gt.png"))
+                    tv.utils.save_image(left_sample_rgb_gc[j], os.path.join(image_path, fn + "_left.png"))
+                    tv.utils.save_image(right_sample_rgb_gc[j], os.path.join(image_path, fn + "_right.png"))
                     tv.utils.save_image(
                         guidance_data[j], os.path.join(image_path, fn + "_rgb.png")
                     )
 
                     if save_timesteps:
-                        for t, s in enumerate(samples_rgb_gc):
+                        for t, (s_left, s_right) in enumerate(zip(samples_left_rgb_gc, samples_right_rgb_gc)):
                             tv.utils.save_image(
-                                s[j], os.path.join(image_path, f"{fn}_{t}.png")
+                                s_left[j], os.path.join(image_path, f"{fn}_left_{t}.png")
+                            )
+                            tv.utils.save_image(
+                                s_right[j], os.path.join(image_path, f"{fn}_right_{t}.png")
                             )
 
                 if save_pred:
                     if save_as_hdf5:
-                        pred_np_path = os.path.join(
-                            inference_output_path, fn + "_pred_u16.hdf5"
+                        left_pred_np_path = os.path.join(
+                            inference_output_path, fn + "_left_pred_u16.hdf5"
                         )
-                        create_folder_for_file(pred_np_path)
-                        sample_data = sample_np[j].transpose(1, 2, 0)
-                        sample_data = (sample_data * 65535).astype(np.uint16)
-                        with h5py.File(pred_np_path, "w") as f:
+                        create_folder_for_file(left_pred_np_path)
+                        left_sample_data = left_sample_np[j].transpose(1, 2, 0)
+                        left_sample_data = (left_sample_data * 65535).astype(np.uint16)
+                        with h5py.File(left_pred_np_path, "w") as f:
                             f.create_dataset(
                                 "raw",
-                                data=sample_data,
+                                data=left_sample_data,
+                                compression="gzip",
+                                compression_opts=9,
+                            )
+
+                        right_pred_np_path = os.path.join(
+                            inference_output_path, fn + "_right_pred_u16.hdf5"
+                        )
+                        create_folder_for_file(right_pred_np_path)
+                        right_sample_data = right_sample_np[j].transpose(1, 2, 0)
+                        right_sample_data = (right_sample_data * 65535).astype(np.uint16)
+                        with h5py.File(right_pred_np_path, "w") as f:
+                            f.create_dataset(
+                                "raw",
+                                data=right_sample_data,
                                 compression="gzip",
                                 compression_opts=9,
                             )
                     else:
-                        pred_np_path = os.path.join(
-                            inference_output_path, fn + "_pred.npy"
+                        left_pred_np_path = os.path.join(
+                            inference_output_path, fn + "_left_pred.npy"
                         )
-                        create_folder_for_file(pred_np_path)
-                        np.save(pred_np_path, sample_np[j].transpose(1, 2, 0))
+                        create_folder_for_file(left_pred_np_path)
+                        np.save(left_pred_np_path, left_sample_np[j].transpose(1, 2, 0))
+
+                        right_pred_np_path = os.path.join(
+                            inference_output_path, fn + "_right_pred.npy"
+                        )
+                        create_folder_for_file(right_pred_np_path)
+                        np.save(right_pred_np_path, right_sample_np[j].transpose(1, 2, 0))
 
                 if save_tar:
                     np.save(
-                        os.path.join(inference_output_path, fn + "_tar.npy"),
-                        batch_np[j].transpose(1, 2, 0),
+                        os.path.join(inference_output_path, fn + "_left_tar.npy"),
+                        left_batch_np[j].transpose(1, 2, 0),
+                    )
+                    np.save(
+                        os.path.join(inference_output_path, fn + "_right_tar.npy"),
+                        right_batch_np[j].transpose(1, 2, 0),
                     )
 
                 num_samples += 1

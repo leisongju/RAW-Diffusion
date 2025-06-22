@@ -9,7 +9,7 @@ general:
   lr: 1e-4
   weight_decay: 0.0
   schedule_sampler: "uniform"
-  max_steps: 70000
+  max_steps: 100000
   drop_rate: 0.0
   save_interval: 1000
   checkpoint: true
@@ -28,7 +28,7 @@ general:
   min_mode: 'black_level' # min_value, black_level
   
   seed: 0
-  image_size: 256
+  image_size: 512
 
 model:
   _target_: rawdiffusion.models.rawdiffusion.PDRAWDiffusionModel

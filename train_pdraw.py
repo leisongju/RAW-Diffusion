@@ -44,7 +44,7 @@ class PDRAWDiffusionModule(LightningModule):
         image_size = self.params.general.image_size
 
         # 使用PDRAW模型，输入是RGB（3通道），输出是左右眼RAW拼接（6通道）
-        self.model = instantiate(self.params.model, image_size=image_size, in_channels=3, out_channels=3)
+        self.model = instantiate(self.params.model, image_size=image_size, in_channels=6, out_channels=3)
         self.diffusion = create_gaussian_diffusion(**self.params.diffusion)
         self.diffusion_val = create_gaussian_diffusion(**self.params.diffusion_val)
         self.schedule_sampler = create_named_schedule_sampler(

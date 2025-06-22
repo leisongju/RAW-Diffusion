@@ -190,7 +190,7 @@ class PDRAWDiffusionModel(nn.Module):
         self.shared_encoder = nn.ModuleList(
             [
                 TimestepEmbedSequential(
-                    conv_nd(dims, 6, ch, 3, padding=1, padding_mode="reflect")
+                    conv_nd(dims, in_channels, ch, 3, padding=1, padding_mode="reflect")
                 )
             ]
         )
